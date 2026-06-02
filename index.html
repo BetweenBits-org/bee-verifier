@@ -87,7 +87,8 @@
   <div class="banner">
     🔓 <b>완전 독립 검증</b> — 이 페이지는 공개 소스(<span class="mono">bee-verifier</span>)입니다.
     검증 과정에서 <b>BitCert 서버에 접속하지 않습니다.</b> 오직 아래에 지정한 <b>공개 Bitcoin 익스플로러</b>와
-    브라우저 안의 계산(SHA-256)만 사용합니다. 필요한 입력은 <b>영수증 PDF</b>와 <b>인스크립션 ID</b> 둘뿐입니다.
+    브라우저 안의 계산(SHA-256 · secp256k1)만 사용합니다. <b>인스크립션 ID(reveal txid)만으로</b> 체인에서 정산증서를 꺼내
+    <b>송금·수령 법인의 서명</b>을 각 공개키로 검증합니다 (영수증 PDF는 문서 무결성 대조용 — 선택).
     <br/>📦 전체 소스 공개:
     <a href="https://github.com/BetweenBits-org/bee-verifier" target="_blank" rel="noreferrer">github.com/BetweenBits-org/bee-verifier</a>
     (<a href="https://github.com/BetweenBits-org/bee-verifier/archive/refs/heads/main.zip">⬇ ZIP 다운로드</a>)
@@ -102,7 +103,7 @@
     <label>공개 Bitcoin 소스 <span class="muted">(익스플로러 base URL · esplora/mempool API 호환)</span></label>
     <input id="explorer" type="text" placeholder="https://mempool.space" spellcheck="false" autocomplete="off" />
 
-    <label>영수증 PDF <span class="muted">(감사기관 보유본 — 드래그 & 드롭 또는 클릭)</span></label>
+    <label>영수증 PDF <span class="muted">(선택 — 없으면 ID만으로 서명·앵커링 검증 · 제출 시 문서 무결성까지 대조)</span></label>
     <div id="drop" class="drop">
       <div id="dropHint">📄 영수증 PDF를 여기에 끌어다 놓거나 클릭하여 선택</div>
       <input id="file" type="file" accept="application/pdf,.pdf" style="display:none" />
@@ -197,6 +198,94 @@ function sha256(msg){
 const sha256hex=(b)=>bytesToHex(sha256(b));
 const dsha=(b)=>sha256(sha256(b));
 
+/* ---------- 결정론적 canonical JSON (오케스트레이터 anchor.ts와 동일: 키 정렬) ---------- */
+function _sortKeys(v){
+  if(Array.isArray(v)) return v.map(_sortKeys);
+  if(v && typeof v==='object') return Object.keys(v).sort().reduce((a,k)=>{a[k]=_sortKeys(v[k]);return a;},{});
+  return v;
+}
+function canonicalJson(o){ return JSON.stringify(_sortKeys(o)); }
+
+/* ---------- secp256k1 BIP340 Schnorr 검증 (의존성 0 · 순수 BigInt) ----------
+ * 법인 이중서명 검증용. 외부 라이브러리·SubtleCrypto 없이 체인에서 추출한
+ * 서명을 각 법인 공개키로 직접 검증한다(서버 비의존). 내장 sha256으로 tagged-hash 구성. */
+const SECP=(function(){
+  const P=0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2Fn;
+  const N=0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141n;
+  const Gx=0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798n;
+  const Gy=0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8n;
+  const mod=(a,m=P)=>{ const r=a%m; return r>=0n?r:r+m; };
+  const pw=(b,e,m)=>{ b=mod(b,m); let r=1n; while(e>0n){ if(e&1n)r=(r*b)%m; b=(b*b)%m; e>>=1n; } return r; };
+  const inv=(a,m)=>pw(a,m-2n,m);
+  const INF={X:0n,Y:1n,Z:0n};                       // 무한원점 (Jacobian Z=0)
+  function dbl(p){
+    if(p.Z===0n) return INF;
+    const {X,Y,Z}=p;
+    const A=mod(X*X), B=mod(Y*Y), C=mod(B*B);
+    const D=mod(2n*(mod((X+B)*(X+B))-A-C));
+    const E=mod(3n*A), F=mod(E*E);
+    const X3=mod(F-2n*D);
+    const Y3=mod(E*(D-X3)-8n*C);
+    const Z3=mod(2n*Y*Z);
+    return {X:X3,Y:Y3,Z:Z3};
+  }
+  function add(p,q){
+    if(p.Z===0n) return q; if(q.Z===0n) return p;
+    const Z1Z1=mod(p.Z*p.Z), Z2Z2=mod(q.Z*q.Z);
+    const U1=mod(p.X*Z2Z2), U2=mod(q.X*Z1Z1);
+    const S1=mod(p.Y*q.Z*Z2Z2), S2=mod(q.Y*p.Z*Z1Z1);
+    if(U1===U2) return S1===S2 ? dbl(p) : INF;
+    const H=mod(U2-U1), I=mod(mod(2n*H)*mod(2n*H)), J=mod(H*I);
+    const r=mod(2n*(S2-S1)), V=mod(U1*I);
+    const X3=mod(r*r-J-2n*V);
+    const Y3=mod(r*(V-X3)-2n*S1*J);
+    const Z3=mod(mod(mod((p.Z+q.Z)*(p.Z+q.Z))-Z1Z1-Z2Z2)*H);
+    return {X:X3,Y:Y3,Z:Z3};
+  }
+  function mul(k,p){ let r=INF,a=p; while(k>0n){ if(k&1n)r=add(r,a); a=dbl(a); k>>=1n; } return r; }
+  function toAffine(p){ if(p.Z===0n)return null; const zi=inv(p.Z,P),zi2=mod(zi*zi); return {x:mod(p.X*zi2),y:mod(p.Y*zi2*zi)}; }
+  const G={X:Gx,Y:Gy,Z:1n};
+  function liftX(x){
+    if(x>=P) return null;
+    const c=mod(x*x*x+7n);
+    const y=pw(c,(P+1n)/4n,P);
+    if(mod(y*y)!==c) return null;
+    return { x, y:(y&1n)===0n?y:P-y };              // even-Y (BIP340)
+  }
+  const toBig=(b)=>{ let n=0n; for(let i=0;i<b.length;i++)n=(n<<8n)|BigInt(b[i]); return n; };
+  function taggedHash(tag,msg){ const th=sha256(new TextEncoder().encode(tag)); return sha256(concat([th,th,msg])); }
+  /** BIP340 검증: pub(32B x-only) · msg(32B) · sig(64B) → bool */
+  function schnorrVerify(pub,msg,sig){
+    try{
+      if(pub.length!==32||msg.length!==32||sig.length!==64) return false;
+      const Pp=liftX(toBig(pub)); if(!Pp) return false;
+      const r=toBig(sig.subarray(0,32)), s=toBig(sig.subarray(32,64));
+      if(r>=P||s>=N) return false;
+      const e=mod(toBig(taggedHash('BIP0340/challenge',concat([sig.subarray(0,32),pub,msg]))),N);
+      const R=toAffine(add(mul(s,G), mul(mod(N-e,N),{X:Pp.x,Y:Pp.y,Z:1n})));   // s·G − e·P
+      if(!R) return false;
+      if((R.y&1n)!==0n) return false;                 // R.y 짝수
+      return R.x===r;
+    }catch(_){ return false; }
+  }
+  return { schnorrVerify };
+})();
+
+/* ---------- 인스크립션 본문에서 이중서명 정산증서(JSON) 추출 ---------- */
+function extractAttestation(body){
+  const MARK='%%BEECERT-ATTESTATION-V1%%';
+  const s=new TextDecoder('utf-8',{fatal:false}).decode(body);   // 앞부분 PDF 바이너리는 무시, 끝의 ASCII 증서만 사용
+  const i=s.indexOf(MARK);
+  if(i<0) return null;
+  try{ return JSON.parse(s.slice(i+MARK.length).trim()); }catch(_){ return null; }
+}
+
+/* ---------- 법인 공개키 레지스트리 (pubkey ↔ 법인 바인딩 · 온보딩 등록값) ---------- */
+const CORP_REGISTRY={
+  '0b3472dfa07381441d3082769cffe3db08f16c9ab5a55681cfc69859b6ff58fe':'베트남 법인 (송금)',
+  '7effcfc5bad4664f347b08af2004d16efb074e132807a1b64b073494f25248f3':'인도네시아 법인 (수령)',
+};
+
 /* ---------- Bitcoin script 토크나이저 / "beecert" envelope ---------- */
 function tokenize(buf){ const out=[]; let i=0;
   while(i<buf.length){ const op=buf[i++];
@@ -265,16 +354,22 @@ function parseTx(buf){
 /* ---------- 검증 코어 (DOM 비의존 — Node에서도 그대로 실행 가능) ---------- */
 const PASS='pass',FAIL='fail',WARN='warn',SKIP='skip',INFO='info';
 function runVerification(input){
-  // input: { pdfBytes, revealBytes }
+  // input: { pdfBytes(선택), revealBytes }
   const checks=[]; const dump={};
   const add=(status,t,d,kv)=>checks.push({status,t,d,kv});
 
-  // ① 영수증 PDF 지문
-  const pdfHash=sha256hex(input.pdfBytes);
-  dump.receiptSha256=pdfHash; dump.receiptBytes=input.pdfBytes.length;
-  add(INFO,'① 영수증 PDF 지문 (원본 바인딩)',
-    `감사기관이 제출한 영수증 PDF(${input.pdfBytes.length.toLocaleString()} bytes)의 SHA-256을 계산합니다.`,
-    'sha256(receipt) = '+pdfHash);
+  // ① 영수증 PDF 지문 (PDF 제출 시. ID만으로도 ③~⑤ 서명·앵커링 검증 가능)
+  let pdfHash=null;
+  if(input.pdfBytes){
+    pdfHash=sha256hex(input.pdfBytes);
+    dump.receiptSha256=pdfHash; dump.receiptBytes=input.pdfBytes.length;
+    add(INFO,'① 영수증 PDF 지문 (원본 바인딩)',
+      `감사기관이 제출한 영수증 PDF(${input.pdfBytes.length.toLocaleString()} bytes)의 SHA-256을 계산합니다.`,
+      'sha256(receipt) = '+pdfHash);
+  } else {
+    add(INFO,'① 영수증 PDF (미제출 — 인스크립션 ID만으로 검증)',
+      'PDF 없이 인스크립션 ID(reveal txid)만으로 공개 체인에서 정산증서를 추출해 서명·앵커링을 검증합니다.');
+  }
 
   // reveal tx 파싱
   let reveal;
@@ -286,22 +381,59 @@ function runVerification(input){
     return finalize(checks,dump); }
   const tapscript=w[w.length-2];      // witness 스택 [schnorr_sig, tapscript, control_block] 중 tapscript
 
-  // ② witness envelope → PDF 복원 + 해시 대조
+  // ② witness envelope → 봉인 본문 복원 (+ PDF 제출 시 해시 대조)
   const {body,marker}=extractEnvelope(tapscript);
   const markerStr=marker?new TextDecoder().decode(marker):'(없음)';
   if(!body){ add(FAIL,'② witness 인스크립션 추출','tapscript에서 "beecert" envelope 본문을 찾지 못했습니다.',
-    'marker = '+markerStr); }
-  else {
-    const isPdf=bytesToHex(body.subarray(0,5))==='255044462d'; // %PDF-
-    const chainHash=sha256hex(body);
-    dump.witnessSha256=chainHash; dump.witnessBytes=body.length; dump.marker=markerStr;
+    'marker = '+markerStr);
+    return finalize(checks,dump); }
+  const isPdf=bytesToHex(body.subarray(0,5))==='255044462d'; // %PDF-
+  const chainHash=sha256hex(body);
+  dump.witnessSha256=chainHash; dump.witnessBytes=body.length; dump.marker=markerStr;
+  if(input.pdfBytes){
     const match=chainHash===pdfHash;
     add(match?PASS:FAIL,'② witness 인스크립션 추출 & 해시 대조',
       match
         ? `reveal tx witness에서 추출한 ${isPdf?'PDF':'데이터'}(${body.length.toLocaleString()} bytes)의 해시가 제출한 영수증과 일치합니다. 이 영수증은 체인에 봉인된 그 문서입니다.`
         : `witness에서 추출한 데이터의 해시가 제출한 영수증과 다릅니다 — 영수증이 변조되었거나 다른 건입니다.`,
       `marker="${markerStr}" · sha256(witness) = ${chainHash}`);
+  } else {
+    add(INFO,'② witness 인스크립션 추출',
+      `reveal tx witness에서 봉인 본문(${body.length.toLocaleString()} bytes)을 추출했습니다.`,
+      `marker="${markerStr}" · sha256(witness) = ${chainHash}`);
   }
+
+  // ③~⑤ 법인 이중서명 정산증서 — 체인 witness에서 추출해 각 법인 공개키로 검증 (서버 비의존)
+  const att=extractAttestation(body);
+  if(!att || !att.signers){
+    add(INFO,'③ 법인 이중서명 증서','이 인스크립션에는 법인 서명 증서가 없습니다 (구버전 영수증).');
+    return finalize(checks,dump);
+  }
+  dump.attestation=att;
+  // ③ 서명 다이제스트가 core 사실(주체·금액·거래상대방)과 결속되는지
+  let digestOk=false, calc=null;
+  try{ calc=sha256hex(new TextEncoder().encode(canonicalJson(att.core))); digestOk=(calc===att.signed_digest); }catch(_){}
+  add(digestOk?PASS:FAIL,'③ 서명 다이제스트 ↔ 정산 사실 결속',
+    digestOk
+      ? '서명 대상 다이제스트가 core 사실(주체·금액·거래상대방)의 SHA-256과 일치합니다. 서명은 바로 이 사실에 대한 것입니다.'
+      : '서명 다이제스트가 core 사실과 불일치 — 증서가 변조되었을 수 있습니다.',
+    `core = ${JSON.stringify(att.core)}\nsha256(core)=${calc||'(계산 실패)'} · signed_digest=${att.signed_digest}`);
+
+  // ④·⑤ 각 법인 Schnorr 서명 검증
+  let digest=null; try{ digest=hexToBytes(att.signed_digest); }catch(_){}
+  [['sender','④ 송금법인 서명'],['receiver','⑤ 수령법인 서명']].forEach(([role,num])=>{
+    const s=att.signers[role];
+    if(!s){ add(FAIL,num,'서명 항목이 없습니다.'); return; }
+    const reg=CORP_REGISTRY[(s.pubkey||'').toLowerCase()];
+    let sigOk=false;
+    try{ if(digest) sigOk=SECP.schnorrVerify(hexToBytes(s.pubkey),digest,hexToBytes(s.sig)); }catch(_){}
+    const bind=reg?` · ✓ 레지스트리 등록키(${reg})와 일치` : ' · ⚠ 미등록 공개키';
+    add(sigOk?PASS:FAIL,`${num} — ${s.party}`,
+      sigOk
+        ? `${s.party}의 BIP340 Schnorr 서명이 공개키로 검증되었습니다 — 해당 법인이 이 정산 사실에 서명했음(부인방지).${bind}`
+        : `${s.party}의 서명 검증 실패 — 공개키·서명 불일치 또는 변조.${bind}`,
+      `alg=${s.alg||'?'} · pubkey=${s.pubkey}\nsig=${s.sig}`);
+  });
 
   return finalize(checks,dump);
 }
@@ -320,8 +452,8 @@ if (typeof document!=='undefined') (function(){
   if(params.get('txid')) $('txid').value=params.get('txid').trim();
   $('explorer').value=(params.get('explorer')||'https://mempool.space').trim();
 
-  // 실행 가능 조건: 영수증 PDF + (인스크립션 ID 또는 오프라인 reveal hex)
-  function refreshRunState(){ $('run').disabled=!( pdfBytes && ($('txid').value.trim() || $('revealHex').value.trim()) ); }
+  // 실행 가능 조건: 인스크립션 ID 또는 오프라인 reveal hex (영수증 PDF는 선택 — 없어도 서명·앵커링 검증)
+  function refreshRunState(){ $('run').disabled=!( $('txid').value.trim() || $('revealHex').value.trim() ); }
   ['txid','revealHex'].forEach(id=>$(id).addEventListener('input',refreshRunState));
 
   /* PDF 입력 */
@@ -346,7 +478,7 @@ if (typeof document!=='undefined') (function(){
   $('run').addEventListener('click',doVerify);
   async function doVerify(){
     $('err').style.display='none'; $('verdict').className='verdict'; $('resultsCard').style.display='none';
-    if(!pdfBytes){ showErr('영수증 PDF를 먼저 올려주세요.'); return; }
+    if(!($('txid').value.trim() || $('revealHex').value.trim())){ showErr('인스크립션 ID(reveal txid) 또는 reveal hex를 입력하세요.'); return; }
     setStatus(true,'검증 중…');
     try{
       let input;
@@ -372,9 +504,14 @@ if (typeof document!=='undefined') (function(){
   const ICON={pass:['✓','st-pass'],fail:['✕','st-fail'],warn:['⚠','st-warn'],skip:['–','st-skip'],info:['•','st-info']};
   function render(res){
     const v=$('verdict'); v.classList.add('show',res.ok?'pass':'fail');
-    $('verdictBig').textContent=res.ok?'✓ 검증 성공 — 진본 영수증':'✕ 검증 실패 — 불일치/변조 의심';
+    const signed=!!(res.dump&&res.dump.attestation);
+    $('verdictBig').textContent=res.ok
+      ? (signed?'✓ 검증 성공 — 진본 + 송금·수령 법인 이중서명 확인':'✓ 검증 성공 — 진본 영수증')
+      : '✕ 검증 실패 — 불일치/변조 의심';
     $('verdictMeta').textContent=res.ok
-      ? '제출한 영수증 PDF가 공개 Bitcoin 체인에 봉인된 정산기록과 암호학적으로 일치합니다. (BitCert 서버 비의존)'
+      ? (signed
+          ? '공개 Bitcoin 체인에 봉인된 정산기록과 일치하며, 송금·수령 법인의 Schnorr 서명이 각 공개키로 검증되었습니다 (부인방지 · BitCert 서버 비의존).'
+          : '공개 Bitcoin 체인에 봉인된 정산기록과 암호학적으로 일치합니다. (BitCert 서버 비의존)')
       : '하나 이상의 핵심 검사가 실패했습니다. 아래 단계를 확인하세요.';
     const box=$('checks'); box.innerHTML='';
     for(const c of res.checks){
@@ -413,7 +550,7 @@ if (typeof document!=='undefined') (function(){
 
 /* Node 단위 테스트용 export (브라우저에선 무시됨) */
 if (typeof module!=='undefined' && module.exports){
-  module.exports={ sha256hex,dsha,hexToBytes,bytesToHex,parseTx,extractEnvelope,tokenize,runVerification };
+  module.exports={ sha256hex,dsha,hexToBytes,bytesToHex,parseTx,extractEnvelope,tokenize,runVerification,SECP,canonicalJson,extractAttestation };
 }
 </script>
 </body>
