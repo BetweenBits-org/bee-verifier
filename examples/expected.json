@@ -1,0 +1,11 @@
+{
+  "_comment": "bee-verifier 오프라인 검증용 캡처 벡터. Project Bee S4 regtest에서 실제 인스크립션된 정산 영수증 1건. regtest는 리셋되므로 온라인(--explorer) 조회는 불가할 수 있고, 동봉한 reveal raw hex로 오프라인 검증하면 항상 재현된다.",
+  "inscriptionId": "1cf7da514bf266555cc7ac0230d7432d0bf3c89ee30df277a5a72b5e56f63d85",
+  "marker": "beecert",
+  "receipt": { "file": "sample-receipt.pdf", "bytes": 3014, "sha256": "984dcc78ccc229f2628fea227aa13f269fd6fd03aa5155b05351c3bed8c5e8b2" },
+  "expectedResult": {
+    "check1_receiptFingerprint": "INFO",
+    "check2_witnessInscription": "PASS",
+    "overall": "VERIFIED"
+  }
+}
