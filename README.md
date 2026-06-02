@@ -8,9 +8,7 @@
 · [ZIP 다운로드](https://github.com/BetweenBits-org/bee-verifier/archive/refs/heads/main.zip)
 · `git clone https://github.com/BetweenBits-org/bee-verifier.git`
 
-> 참조 설계: [`github.com/BetweenBits-org/bitcert-verifier`](https://github.com/BetweenBits-org/bitcert-verifier).
-> 그 프로젝트는 `OP_RETURN + Merkle` 스킴을 검증하지만, **bee-verifier는 Project Bee S4가 실제로 쓰는
-> Taproot commit/reveal witness 인스크립션("beecert" envelope) 스킴 전용으로 새로 구현한 별개 프로젝트**입니다.
+> bee-verifier는 Project Bee S4가 쓰는 **Taproot commit/reveal witness 인스크립션("beecert" envelope) 스킴 전용** 독립 검증기입니다.
 
 ---
 
