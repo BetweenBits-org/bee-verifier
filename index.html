@@ -49,9 +49,11 @@
   .verdict.show{display:block}
   .verdict.pass{background:rgba(16,185,129,.12);border:1px solid rgba(16,185,129,.45)}
   .verdict.fail{background:rgba(244,63,94,.12);border:1px solid rgba(244,63,94,.45)}
+  .verdict.warn{background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.5)}
   .verdict .big{font-size:17px;font-weight:800}
   .verdict.pass .big{color:#34d399}
   .verdict.fail .big{color:#fb7185}
+  .verdict.warn .big{color:#fbbf24}
   .verdict .meta{font-size:11.5px;color:var(--mut);margin-top:4px}
   .check{display:flex;gap:11px;padding:11px 0;border-top:1px solid var(--line)}
   .check:first-child{border-top:none}
@@ -455,8 +457,14 @@ function runVerification(input){
 }
 function finalize(checks,dump){
   const hard=checks.filter(c=>c.status===PASS||c.status===FAIL);
-  const ok=hard.length>0 && hard.every(c=>c.status===PASS);
-  return {checks,dump,ok};
+  const anyFail=hard.some(c=>c.status===FAIL);
+  // 진본 '성공'은 ② 영수증 해시 대조 또는 ③④⑤ 법인 서명 같은 **실질** 검사 PASS가 있어야 한다.
+  // ⓪(txid 재계산 결속)·①(PDF 지문)은 보조/맥락 정보라 단독으로는 진본을 입증하지 못한다
+  // (예: PDF 미제출 + 서명 없는 인스크립션 → ⓪만 PASS여도 '성공' 아님).
+  const substantivePass=checks.some(c=>c.status===PASS && /^[②③④⑤]/.test(c.t));
+  const ok=!anyFail && substantivePass;
+  const incomplete=!anyFail && !substantivePass; // 실패는 아니나 진본 대조 근거(PDF/서명) 부족
+  return {checks,dump,ok,incomplete};
 }
 
 /* =========================== DOM 와이어링 =========================== */
@@ -521,16 +529,22 @@ if (typeof document!=='undefined') (function(){
 
   const ICON={pass:['✓','st-pass'],fail:['✕','st-fail'],warn:['⚠','st-warn'],skip:['–','st-skip'],info:['•','st-info']};
   function render(res){
-    const v=$('verdict'); v.classList.add('show',res.ok?'pass':'fail');
+    const v=$('verdict');
+    const state=res.ok?'pass':(res.incomplete?'warn':'fail');
+    v.classList.add('show',state);
     const signed=!!(res.dump&&res.dump.attestation);
     $('verdictBig').textContent=res.ok
       ? (signed?'✓ 검증 성공 — 진본 + 송금·수령 법인 이중서명 확인':'✓ 검증 성공 — 진본 영수증')
-      : '✕ 검증 실패 — 불일치/변조 의심';
+      : res.incomplete
+        ? '⚠ 검증 불완전 — 영수증 PDF 또는 서명 인스크립션이 필요합니다'
+        : '✕ 검증 실패 — 불일치/변조 의심';
     $('verdictMeta').textContent=res.ok
       ? (signed
           ? '공개 Bitcoin 체인에 봉인된 정산기록과 일치하며, 송금·수령 법인의 Schnorr 서명이 각 공개키로 검증되었습니다 (부인방지 · BitCert 서버 비의존).'
           : '공개 Bitcoin 체인에 봉인된 정산기록과 암호학적으로 일치합니다. (BitCert 서버 비의존)')
-      : '하나 이상의 핵심 검사가 실패했습니다. 아래 단계를 확인하세요.';
+      : res.incomplete
+        ? '인스크립션 본문은 체인에서 추출했으나, 진본 여부를 확정하려면 영수증 PDF를 제출(witness 해시 대조)하거나 법인 서명이 포함된 인스크립션이어야 합니다. 대시보드 "독립검증" 버튼은 영수증 PDF를 자동 주입합니다.'
+        : '하나 이상의 핵심 검사가 실패했습니다. 아래 단계를 확인하세요.';
     const box=$('checks'); box.innerHTML='';
     for(const c of res.checks){
       const [ic,cls]=ICON[c.status];
