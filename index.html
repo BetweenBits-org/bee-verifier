@@ -379,21 +379,6 @@ function runVerification(input){
   catch(e){ add(FAIL,'reveal 트랜잭션 파싱','원시 트랜잭션을 해석하지 못했습니다: '+e.message);
     return finalize(checks,dump); }
 
-  // ⓪ reveal txid 재계산 — 입력 트랜잭션 바이트가 (감사기관이 공개 익스플로러에서 보는) 그 인스크립션인지 결속.
-  dump.revealTxid=reveal.txid;
-  if(input.claimedTxid){
-    const idOk=reveal.txid===input.claimedTxid;
-    add(idOk?PASS:FAIL,'⓪ reveal 트랜잭션 ID 재계산',
-      idOk
-        ? '입력 트랜잭션을 직렬화해 재계산한 txid가 검증 대상 인스크립션 ID와 일치합니다 — 이 바이트가 공개 체인의 바로 그 트랜잭션입니다(공개 익스플로러에서 동일 txid 확인 가능).'
-        : '재계산한 txid가 제시된 인스크립션 ID와 다릅니다 — 입력 트랜잭션이 일치하지 않습니다.',
-      `재계산 txid = ${reveal.txid}\n대상 txid   = ${input.claimedTxid}`);
-  } else {
-    add(INFO,'⓪ reveal 트랜잭션 ID 재계산',
-      '입력 트랜잭션의 txid를 재계산했습니다 (공개 익스플로러에서 동일 txid 확인 가능).',
-      `재계산 txid = ${reveal.txid}`);
-  }
-
   const w=reveal.vin[0] && reveal.vin[0].witness;
   if(!w || w.length<2){ add(FAIL,'② witness 인스크립션 추출','reveal tx 입력에 tapscript witness가 없습니다 (인스크립션 tx가 아님).');
     return finalize(checks,dump); }
@@ -421,23 +406,19 @@ function runVerification(input){
       `marker="${markerStr}" · sha256(witness) = ${chainHash}`);
   }
 
-  // ③~⑤ 법인 이중서명 정산증서 — 체인 witness에서 추출해 각 법인 공개키로 검증 (서버 비의존)
+  // ④·⑤ 법인 이중서명 정산증서 — 체인 witness에서 추출해 각 법인 공개키로 검증 (서버 비의존)
   const att=extractAttestation(body);
   if(!att || !att.signers){
-    add(INFO,'③ 법인 이중서명 증서','이 인스크립션에는 법인 서명 증서가 없습니다 (구버전 영수증).');
+    add(INFO,'법인 이중서명 증서','이 인스크립션에는 법인 서명 증서가 없습니다 (구버전 영수증).');
     return finalize(checks,dump);
   }
   dump.attestation=att;
-  // ③ 서명 다이제스트가 core 사실(주체·금액·거래상대방)과 결속되는지
+  // 서명 대상 다이제스트가 core 사실(주체·금액·거래상대방)과 결속되는지 — ④·⑤ 서명검증 PASS 조건에 포함.
   let digestOk=false, calc=null;
   try{ calc=sha256hex(new TextEncoder().encode(canonicalJson(att.core))); digestOk=(calc===att.signed_digest); }catch(_){}
-  add(digestOk?PASS:FAIL,'③ 서명 다이제스트 ↔ 정산 사실 결속',
-    digestOk
-      ? '서명 대상 다이제스트가 core 사실(주체·금액·거래상대방)의 SHA-256과 일치합니다. 서명은 바로 이 사실에 대한 것입니다.'
-      : '서명 다이제스트가 core 사실과 불일치 — 증서가 변조되었을 수 있습니다.',
-    `core = ${JSON.stringify(att.core)}\nsha256(core)=${calc||'(계산 실패)'} · signed_digest=${att.signed_digest}`);
+  dump.digestBound=digestOk;
 
-  // ④·⑤ 각 법인 Schnorr 서명 검증
+  // ④·⑤ 각 법인 Schnorr 서명 검증 (서명 유효 + 서명대상 다이제스트가 정산 사실과 결속됨을 함께 확인)
   let digest=null; try{ digest=hexToBytes(att.signed_digest); }catch(_){}
   [['sender','④ 송금법인 서명'],['receiver','⑤ 수령법인 서명']].forEach(([role,num])=>{
     const s=att.signers[role];
@@ -446,10 +427,13 @@ function runVerification(input){
     let sigOk=false;
     try{ if(digest) sigOk=SECP.schnorrVerify(hexToBytes(s.pubkey),digest,hexToBytes(s.sig)); }catch(_){}
     const bind=reg?` · ✓ 레지스트리 등록키(${reg})와 일치` : ' · ⚠ 미등록 공개키';
-    add(sigOk?PASS:FAIL,`${num} — ${s.party}`,
-      sigOk
-        ? `${s.party}의 BIP340 Schnorr 서명이 공개키로 검증되었습니다 — 해당 법인이 이 정산 사실에 서명했음(부인방지).${bind}`
-        : `${s.party}의 서명 검증 실패 — 공개키·서명 불일치 또는 변조.${bind}`,
+    const pass=sigOk && digestOk;
+    add(pass?PASS:FAIL,`${num} — ${s.party}`,
+      pass
+        ? `${s.party}의 BIP340 Schnorr 서명이 공개키로 검증되었고, 서명 대상이 이 정산 사실(주체·금액·거래상대방)과 결속됩니다 — 해당 법인이 바로 이 정산에 서명했음(부인방지).${bind}`
+        : (!sigOk
+            ? `${s.party}의 서명 검증 실패 — 공개키·서명 불일치 또는 변조.${bind}`
+            : `${s.party}의 서명은 유효하나 서명 대상이 정산 사실과 불일치 — 증서 변조 의심.${bind}`),
       `alg=${s.alg||'?'} · pubkey=${s.pubkey}\nsig=${s.sig}`);
   });
 
@@ -510,14 +494,13 @@ if (typeof document!=='undefined') (function(){
       const txid=$('txid').value.trim().toLowerCase().replace(/i\d+$/,''); // ordinals 식 txidi0 허용
       if(revealHexManual){
         // 오프라인 모드 — 주입/입력된 raw reveal hex 사용. (GitHub Pages 등 HTTPS 호스팅에서는
-        // HTTP 익스플로러 직접조회가 mixed-content로 막히므로 hex를 받아 검증.) 체인 대조는
-        // 아래 ⓪ 체크가 재계산한 txid를 공개 익스플로러에서 확인하면 된다.
-        input={ pdfBytes, revealBytes: hexToBytes(revealHexManual), claimedTxid: txid||null };
+        // HTTP 익스플로러 직접조회가 mixed-content로 막히므로 부모가 hex를 주입해 검증.)
+        input={ pdfBytes, revealBytes: hexToBytes(revealHexManual) };
       } else {
         // fetch 모드 — 공개 익스플로러에서 reveal tx만 조회 (witness 추출용)
         setStatus(true,'reveal tx 조회…');
         const revealBytes=hexToBytes(await fetchText(`${apiBase()}/api/tx/${txid}/hex`));
-        input={ pdfBytes, revealBytes, claimedTxid: txid };
+        input={ pdfBytes, revealBytes };
       }
       const res=runVerification(input);
       render(res);
