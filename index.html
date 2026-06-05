@@ -376,6 +376,22 @@ function runVerification(input){
   try{ reveal=parseTx(input.revealBytes); }
   catch(e){ add(FAIL,'reveal 트랜잭션 파싱','원시 트랜잭션을 해석하지 못했습니다: '+e.message);
     return finalize(checks,dump); }
+
+  // ⓪ reveal txid 재계산 — 입력 트랜잭션 바이트가 (감사기관이 공개 익스플로러에서 보는) 그 인스크립션인지 결속.
+  dump.revealTxid=reveal.txid;
+  if(input.claimedTxid){
+    const idOk=reveal.txid===input.claimedTxid;
+    add(idOk?PASS:FAIL,'⓪ reveal 트랜잭션 ID 재계산',
+      idOk
+        ? '입력 트랜잭션을 직렬화해 재계산한 txid가 검증 대상 인스크립션 ID와 일치합니다 — 이 바이트가 공개 체인의 바로 그 트랜잭션입니다(공개 익스플로러에서 동일 txid 확인 가능).'
+        : '재계산한 txid가 제시된 인스크립션 ID와 다릅니다 — 입력 트랜잭션이 일치하지 않습니다.',
+      `재계산 txid = ${reveal.txid}\n대상 txid   = ${input.claimedTxid}`);
+  } else {
+    add(INFO,'⓪ reveal 트랜잭션 ID 재계산',
+      '입력 트랜잭션의 txid를 재계산했습니다 (공개 익스플로러에서 동일 txid 확인 가능).',
+      `재계산 txid = ${reveal.txid}`);
+  }
+
   const w=reveal.vin[0] && reveal.vin[0].witness;
   if(!w || w.length<2){ add(FAIL,'② witness 인스크립션 추출','reveal tx 입력에 tapscript witness가 없습니다 (인스크립션 tx가 아님).');
     return finalize(checks,dump); }
@@ -484,14 +500,16 @@ if (typeof document!=='undefined') (function(){
       let input;
       const revealHexManual=$('revealHex').value.trim();
       const txid=$('txid').value.trim().toLowerCase().replace(/i\d+$/,''); // ordinals 식 txidi0 허용
-      if(txid){
+      if(revealHexManual){
+        // 오프라인 모드 — 주입/입력된 raw reveal hex 사용. (GitHub Pages 등 HTTPS 호스팅에서는
+        // HTTP 익스플로러 직접조회가 mixed-content로 막히므로 hex를 받아 검증.) 체인 대조는
+        // 아래 ⓪ 체크가 재계산한 txid를 공개 익스플로러에서 확인하면 된다.
+        input={ pdfBytes, revealBytes: hexToBytes(revealHexManual), claimedTxid: txid||null };
+      } else {
         // fetch 모드 — 공개 익스플로러에서 reveal tx만 조회 (witness 추출용)
         setStatus(true,'reveal tx 조회…');
         const revealBytes=hexToBytes(await fetchText(`${apiBase()}/api/tx/${txid}/hex`));
-        input={ pdfBytes, revealBytes };
-      } else {
-        // 오프라인 모드 — raw reveal hex 직접 입력
-        input={ pdfBytes, revealBytes: hexToBytes(revealHexManual) };
+        input={ pdfBytes, revealBytes, claimedTxid: txid };
       }
       const res=runVerification(input);
       render(res);
@@ -534,10 +552,12 @@ if (typeof document!=='undefined') (function(){
     if(d.type!=='load')return;
     if(d.txid) $('txid').value=String(d.txid).trim();
     if(d.explorer) $('explorer').value=String(d.explorer).trim();
+    // reveal hex 주입 — HTTPS 호스팅(GitHub Pages)은 HTTP 익스플로러 직접조회가 막히므로 부모가 hex를 넣어준다.
+    if(d.revealHex) $('revealHex').value=String(d.revealHex).trim();
     if(d.pdfB64){ try{ const bin=atob(d.pdfB64); const u=new Uint8Array(bin.length);
       for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i); setPdf(u,d.pdfName||'settlement-receipt.pdf'); }catch(_){} }
     refreshRunState();
-    if(d.autorun && pdfBytes && $('txid').value.trim()) doVerify();
+    if(d.autorun && ($('txid').value.trim() || $('revealHex').value.trim())) doVerify();
   });
   try{
     const ready={source:'bee-verifier',type:'ready',txid:($('txid').value||'').trim()};
