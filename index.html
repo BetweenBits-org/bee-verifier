@@ -437,6 +437,20 @@ function runVerification(input){
       `alg=${s.alg||'?'} · pubkey=${s.pubkey}\nsig=${s.sig}`);
   });
 
+  // ⑥ AML/CFT 준수 — core에 결속된 ZK 준수증명 커밋 (양 법인 서명 + 비트코인 인스크립션에 포함)
+  if(att.core && att.core.aml_compliance){
+    const a=att.core.aml_compliance;
+    const pass=digestOk && a.verified===true;
+    add(pass?PASS:INFO,'⑥ AML/CFT 준수 (ZK)',
+      pass
+        ? 'KYC·제재스크리닝·트래블룰 준수 ZK 증명(payloadCommitment)이 양 법인 서명 + 비트코인 인스크립션에 결속됨 — 신원·금액을 노출하지 않고 "준수했음"이 서버 비의존으로 검증됨.'
+        : 'aml_compliance가 서명 core에 있으나 다이제스트 결속/검증이 불완전합니다.',
+      `scheme=${a.scheme} · verified=${a.verified} · report_required=${a.report_required}\n`+
+      `payload_commitment=${a.payload_commitment}\n`+
+      `amount_commitment=${a.amount_commitment}\n`+
+      `denylist_root=${a.denylist_root}\nkyc_issuer(Ax)=${a.kyc_issuer}`);
+  }
+
   return finalize(checks,dump);
 }
 function finalize(checks,dump){
